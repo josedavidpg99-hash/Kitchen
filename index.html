@@ -67,9 +67,13 @@
       padding: 5px;
     }
 
+    input[type="text"] {
+      padding: 5px;
+    }
+
     select {
       padding: 5px;
-      width: 90px;
+      width: 100px;
       font-weight: bold;
     }
 
@@ -100,6 +104,7 @@
       margin-top: 15px;
       display: none;
       gap: 10px;
+      flex-wrap: wrap;
     }
 
     button {
@@ -130,13 +135,14 @@
       }
 
       th, td {
-        font-size: 10px;
-        padding: 5px;
+        font-size: 9px;
+        padding: 4px;
       }
 
       input, select {
         border: none;
         background: transparent;
+        font-size: 9px;
       }
 
       .review {
@@ -151,7 +157,9 @@
 <body>
 
   <h1>Inventory LP Verification</h1>
-  <div class="subtitle">System lot comes from Inventory Number. LP Match is marked manually as Yes or No.</div>
+  <div class="subtitle">
+    System lot comes from Inventory Number. Expiration Date loads from the file. LP Match and Adjust are marked manually.
+  </div>
 
   <div class="top-info">
     <div>
@@ -174,7 +182,8 @@
     <strong>Upload Excel / CSV</strong><br><br>
     <input type="file" accept=".csv,.xls,.xlsx" onchange="loadFile(event)">
     <p style="font-size:12px;color:#666;">
-      Required columns: Item, Inventory Number, LP Number, Sum of On Hand / Qty.
+      Required columns: Item, Inventory Number, LP Number, Qty / Sum of On Hand.
+      Optional: Description, Expiration Date.
     </p>
   </div>
 
@@ -184,11 +193,13 @@
         <th>Item</th>
         <th>Description</th>
         <th>Inventory Number<br>(System Lot)</th>
+        <th>Expiration Date</th>
         <th>System LP</th>
         <th>System Qty</th>
         <th>Physical Qty</th>
         <th>Difference</th>
         <th>LP Match?</th>
+        <th>Adjust?</th>
         <th>Review Needed</th>
         <th>Notes</th>
       </tr>
@@ -225,7 +236,7 @@ function loadFile(event) {
 
   reader.onload = function(e) {
     const data = new Uint8Array(e.target.result);
-    const wb = XLSX.read(data, { type: "array" });
+    const wb = XLSX.read(data, { type: "array", cellDates: true });
     const ws = wb.Sheets[wb.SheetNames[0]];
     const json = XLSX.utils.sheet_to_json(ws, { header: 1, defval: "" });
 
@@ -241,6 +252,7 @@ function parseData(data) {
   const iItem = findCol(headers, ["item"]);
   const iDesc = findCol(headers, ["description", "desc"]);
   const iInventoryNumber = findCol(headers, ["inventory number"]);
+  const iExpiration = findCol(headers, ["expiration date", "expiration", "expiry date", "exp date"]);
   const iLP = findCol(headers, ["lp number", "bin number", "lp"]);
   const iQty = findCol(headers, ["sum of on hand", "sum of available", "on hand", "available", "quantity", "qty"]);
 
@@ -256,6 +268,7 @@ function parseData(data) {
       item: String(r[iItem] || "").trim(),
       desc: iDesc !== -1 ? String(r[iDesc] || "").trim() : "",
       inventoryNumber: String(r[iInventoryNumber] || "").trim(),
+      expirationDate: iExpiration !== -1 ? formatExcelDate(r[iExpiration]) : "",
       systemLP: String(r[iLP] || "").trim(),
       systemQty: parseFloat(r[iQty])
     }));
@@ -276,6 +289,7 @@ function renderTable() {
       <td>${escapeHtml(row.item)}</td>
       <td>${escapeHtml(row.desc)}</td>
       <td>${escapeHtml(row.inventoryNumber)}</td>
+      <td>${escapeHtml(row.expirationDate)}</td>
       <td>${escapeHtml(row.systemLP)}</td>
       <td>${format(row.systemQty)}</td>
       <td>
@@ -289,9 +303,16 @@ function renderTable() {
           <option value="No">No</option>
         </select>
       </td>
+      <td>
+        <select onchange="setValue(${row.key}, 'adjust', this.value)">
+          <option value="">Select</option>
+          <option value="Yes">Yes</option>
+          <option value="No">No</option>
+        </select>
+      </td>
       <td id="review-${row.key}">—</td>
       <td>
-        <input placeholder="Notes..." oninput="setValue(${row.key}, 'notes', this.value)">
+        <input type="text" placeholder="Notes..." oninput="setValue(${row.key}, 'notes', this.value)">
       </td>
     `;
 
@@ -333,11 +354,19 @@ function updateRow(key) {
   const reviewCell = document.getElementById("review-" + key);
   const tr = document.getElementById("row-" + key);
 
+  const needsReview = data.lpMatch === "No" || data.adjust === "";
+
   if (data.lpMatch === "No") {
-    reviewCell.innerHTML = '<span class="no">REVIEW</span>';
+    reviewCell.innerHTML = '<span class="no">REVIEW LP</span>';
     tr.classList.add("review");
-  } else if (data.lpMatch === "Yes") {
-    reviewCell.innerHTML = '<span class="yes">OK</span>';
+  } else if (data.adjust === "") {
+    reviewCell.innerHTML = '<span style="color:#b26a00;font-weight:bold;">PENDING</span>';
+    tr.classList.remove("review");
+  } else if (data.adjust === "Yes") {
+    reviewCell.innerHTML = '<span class="yes">ADJUST</span>';
+    tr.classList.remove("review");
+  } else if (data.adjust === "No") {
+    reviewCell.innerHTML = '<span class="yes">NO ADJUST</span>';
     tr.classList.remove("review");
   } else {
     reviewCell.textContent = "—";
@@ -348,8 +377,11 @@ function updateRow(key) {
 function updateSummary() {
   let yes = 0;
   let no = 0;
-  let pending = 0;
+  let pendingLP = 0;
   let counted = 0;
+  let adjustYes = 0;
+  let adjustNo = 0;
+  let adjustPending = 0;
 
   rows.forEach(row => {
     const d = physical[row.key] || {};
@@ -358,7 +390,11 @@ function updateSummary() {
 
     if (d.lpMatch === "Yes") yes++;
     else if (d.lpMatch === "No") no++;
-    else pending++;
+    else pendingLP++;
+
+    if (d.adjust === "Yes") adjustYes++;
+    else if (d.adjust === "No") adjustNo++;
+    else adjustPending++;
   });
 
   document.getElementById("summary").innerHTML = `
@@ -366,7 +402,10 @@ function updateSummary() {
     Counted: ${counted} / ${rows.length} |
     LP Match Yes: ${yes} |
     LP Match No / Review: ${no} |
-    Pending: ${pending}
+    LP Pending: ${pendingLP} |
+    Adjust Yes: ${adjustYes} |
+    Adjust No: ${adjustNo} |
+    Adjust Pending: ${adjustPending}
   `;
 }
 
@@ -378,11 +417,13 @@ function exportCSV() {
     "Item",
     "Description",
     "Inventory Number (System Lot)",
+    "Expiration Date",
     "System LP",
     "System Qty",
     "Physical Qty",
     "Difference",
     "LP Match",
+    "Adjust?",
     "Review Needed",
     "Notes"
   ]];
@@ -396,6 +437,12 @@ function exportCSV() {
     const pqty = parseFloat(d.physicalQty);
     const diff = !isNaN(pqty) ? pqty - row.systemQty : "";
 
+    let review = "";
+    if (d.lpMatch === "No") review = "REVIEW LP";
+    else if (!d.adjust) review = "PENDING";
+    else if (d.adjust === "Yes") review = "ADJUST";
+    else if (d.adjust === "No") review = "NO ADJUST";
+
     output.push([
       area,
       shift,
@@ -403,12 +450,14 @@ function exportCSV() {
       row.item,
       row.desc,
       row.inventoryNumber,
+      row.expirationDate,
       row.systemLP,
       row.systemQty,
       d.physicalQty || "",
       diff,
       d.lpMatch || "",
-      d.lpMatch === "No" ? "REVIEW" : d.lpMatch === "Yes" ? "OK" : "",
+      d.adjust || "",
+      review,
       d.notes || ""
     ]);
   });
@@ -432,6 +481,23 @@ function format(n) {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2
   });
+}
+
+function formatExcelDate(value) {
+  if (!value) return "";
+
+  if (value instanceof Date && !isNaN(value)) {
+    return value.toLocaleDateString("en-US");
+  }
+
+  if (typeof value === "number") {
+    const date = XLSX.SSF.parse_date_code(value);
+    if (date) {
+      return `${date.m}/${date.d}/${date.y}`;
+    }
+  }
+
+  return String(value).trim();
 }
 
 function escapeHtml(value) {
